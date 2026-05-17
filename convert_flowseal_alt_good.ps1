@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $Converter = ".\flowseal_winws_to_nfqws2_smart_v2_dedup_newlines.py"
 $OutDir = ".\converted_alt"
 
-$BinDir = "/opt/zapret2/binaries"
+$BinDir = "/opt/zapret2/files/fake/"
 $ListsDir = "/opt/zapret2/ipset"
 
 $BaseUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main"

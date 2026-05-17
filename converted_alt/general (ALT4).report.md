@@ -1,9 +1,9 @@
 # Conversion report
 
 ## Warnings
-- profile-5:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/binaries/stun.bin,/opt/zapret2/binaries/tls_clienthello_www_google_com.bin
-- profile-7:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/binaries/stun.bin,/opt/zapret2/binaries/tls_clienthello_www_google_com.bin
-- profile-8:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/binaries/stun.bin,/opt/zapret2/binaries/tls_clienthello_www_google_com.bin
+- profile-5:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/files/fake/stun.bin,/opt/zapret2/files/fake/tls_clienthello_www_google_com.bin
+- profile-7:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/files/fake/stun.bin,/opt/zapret2/files/fake/tls_clienthello_www_google_com.bin
+- profile-8:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/files/fake/stun.bin,/opt/zapret2/files/fake/tls_clienthello_www_google_com.bin
 - manual-cutoff:n3
 - manual-cutoff:n3
 - manual-cutoff:n2
