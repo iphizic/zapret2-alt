@@ -21,11 +21,9 @@ DROP_PREFIXES = (
     "--nlm-list",
 )
 
-# Hostlists are valid nfqws2 profile options. Older versions of this
-# converter stripped them, which made converted Flowseal profiles much broader
-# than the original Windows strategy. Keep them by default and expose an
-# explicit --strip-hostlists compatibility switch for minimal configs.
-HOSTLIST_PREFIXES = (
+# File-backed hostlists/ipsets are intentionally stripped for target nfqws2
+# configs. Inline selectors such as --hostlist-domains and --ipset-ip are kept.
+FILE_LIST_OPTIONS = (
     "--ipset",
     "--ipset-exclude",
     "--hostlist",
@@ -491,7 +489,7 @@ def dpi_last_usable_blob(profile: Profile, key: str) -> str | None:
     return None
 
 
-def classify_profile(profile: Profile, *, strip_hostlists: bool = False) -> Profile:
+def classify_profile(profile: Profile, *, keep_hostlists: bool = False) -> Profile:
     kept = []
 
     for t in profile.globals_or_filters:
@@ -507,7 +505,7 @@ def classify_profile(profile: Profile, *, strip_hostlists: bool = False) -> Prof
             profile.dropped.append(t)
             continue
 
-        if strip_hostlists and is_prefix(k, HOSTLIST_PREFIXES):
+        if not keep_hostlists and k in FILE_LIST_OPTIONS:
             profile.dropped.append(t)
             continue
 
@@ -915,7 +913,7 @@ def build_safe_strategy(
     profiles: list[Profile],
     prefer_defaults: bool,
     autofilter_l7: bool = True,
-    strip_hostlists: bool = False,
+    keep_hostlists: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     del autofilter_l7
 
@@ -924,7 +922,7 @@ def build_safe_strategy(
     classified = []
 
     for idx, raw_profile in enumerate(profiles, start=1):
-        p = classify_profile(raw_profile, strip_hostlists=strip_hostlists)
+        p = classify_profile(raw_profile, keep_hostlists=keep_hostlists)
         warn_unhandled_dpi(p, idx, warnings)
         classified.append(p)
 
@@ -1265,7 +1263,7 @@ def convert_profiles(
     profiles: list[Profile],
     prefer_defaults: bool,
     autofilter_l7: bool,
-    strip_hostlists: bool = False,
+    keep_hostlists: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     blobs = BlobStore()
     result_profiles = []
@@ -1274,7 +1272,7 @@ def convert_profiles(
     effective_index = 0
 
     for original_idx, raw_profile in enumerate(profiles, start=1):
-        p = classify_profile(raw_profile, strip_hostlists=strip_hostlists)
+        p = classify_profile(raw_profile, keep_hostlists=keep_hostlists)
         warn_duplicate_dpi(p, original_idx, warnings)
         warn_unhandled_dpi(p, original_idx, warnings)
 
@@ -1390,7 +1388,7 @@ def convert_text(
     prefer_defaults: bool = False,
     autofilter_l7: bool = True,
     strategy_template: str = "none",
-    strip_hostlists: bool = False,
+    keep_hostlists: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     all_tokens = []
 
@@ -1413,7 +1411,7 @@ def convert_text(
             profiles,
             prefer_defaults=prefer_defaults,
             autofilter_l7=autofilter_l7,
-            strip_hostlists=strip_hostlists,
+            keep_hostlists=keep_hostlists,
         )
 
     # "safe" used to mean a compact synthetic template. That discarded too much
@@ -1424,7 +1422,7 @@ def convert_text(
         profiles,
         prefer_defaults=prefer_defaults,
         autofilter_l7=autofilter_l7,
-        strip_hostlists=strip_hostlists,
+        keep_hostlists=keep_hostlists,
     )
 
 
@@ -1558,27 +1556,27 @@ def run_self_tests():
     assert_contains(name, formatted, "--lua-desync=fake\n\n--new\n--filter-udp=443")
     tests.append(name)
 
-    # H. Hostlist options can be stripped explicitly for compatibility.
+    # H. File-backed lists are stripped, inline/domain selectors are preserved.
     name = "H"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --hostlist-exclude-domains=example.org --hostlist-auto=/tmp/auto.txt --dpi-desync=fake --dpi-desync-fake-tls="%BIN%tls.bin"'
     converted, warnings, report = convert_text(
         inp,
         bin_dir="/opt/zapret2/binaries",
         lists_dir="/opt/zapret2/ipset",
-        strip_hostlists=True,
     )
     output_text = "\n".join(converted)
     report_text = "\n".join(report)
-    assert_not_contains(name, output_text, "--hostlist")
+    assert_not_contains(name, output_text, "--hostlist=/opt/zapret2/ipset/list-general.txt")
+    assert_contains(name, output_text, "--hostlist-exclude-domains=example.org")
     assert_not_contains(name, output_text, "list-general.txt")
     assert_contains(name, report_text, "profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt")
-    assert_contains(name, report_text, "profile-1:dropped:--hostlist-exclude-domains=example.org")
+    assert_not_contains(name, report_text, "profile-1:dropped:--hostlist-exclude-domains=example.org")
     assert_contains(name, report_text, "profile-1:dropped:--hostlist-auto=/tmp/auto.txt")
     tests.append(name)
 
-    # I. Hostlist/ipset options are preserved by default for higher fidelity.
+    # I. File-backed list options can still be preserved explicitly.
     name = "I"
-    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", lists_dir="/opt/zapret2/ipset")
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", lists_dir="/opt/zapret2/ipset", keep_hostlists=True)
     output_text = "\n".join(converted)
     report_text = "\n".join(report)
     assert_contains(name, output_text, "--hostlist=/opt/zapret2/ipset/list-general.txt")
@@ -1648,7 +1646,6 @@ def run_self_tests():
         bin_dir="/opt/zapret2/binaries",
         lists_dir="/opt/zapret2/ipset",
         strategy_template="compact-safe",
-        strip_hostlists=True,
     )
     output_text = "\n".join(converted)
     report_text = "\n".join(report)
@@ -1659,20 +1656,26 @@ def run_self_tests():
         assert_not_contains(name, output_text, bad)
     tests.append(name)
 
-    # O. safe now means profile-preserving conversion for better Flowseal parity.
+    # O. safe preserves profile structure while stripping file-backed lists only.
     name = "O"
-    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --dpi-desync=fake --dpi-desync-cutoff=n3 --dpi-desync-fake-tls="%BIN%tls.bin" --new --filter-udp=443 --ipset="%LISTS%ipset-all.txt" --dpi-desync=fake --dpi-desync-fake-quic="%BIN%quic.bin"'
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --hostlist-domains=example.org --dpi-desync=fake --dpi-desync-cutoff=n3 --dpi-desync-fake-tls="%BIN%tls.bin" --new --filter-udp=443 --ipset="%LISTS%ipset-all.txt" --ipset-ip=1.2.3.4 --dpi-desync=fake --dpi-desync-fake-quic="%BIN%quic.bin"'
     converted, warnings, report = convert_text(
         inp,
         bin_dir="/opt/zapret2/binaries",
         lists_dir="/opt/zapret2/ipset",
         strategy_template="safe",
     )
+    output_text = "\n".join(converted)
+    report_text = "\n".join(report)
     text = "\n".join(converted + warnings + report)
-    assert_contains(name, text, "--hostlist=/opt/zapret2/ipset/list-general.txt")
-    assert_contains(name, text, "--ipset=/opt/zapret2/ipset/ipset-all.txt")
-    assert_contains(name, text, "--out-range=<n3")
-    assert_contains(name, text, "--new")
+    assert_not_contains(name, output_text, "--hostlist=/opt/zapret2/ipset/list-general.txt")
+    assert_not_contains(name, output_text, "--ipset=/opt/zapret2/ipset/ipset-all.txt")
+    assert_contains(name, output_text, "--hostlist-domains=example.org")
+    assert_contains(name, output_text, "--ipset-ip=1.2.3.4")
+    assert_contains(name, output_text, "--out-range=<n3")
+    assert_contains(name, output_text, "--new")
+    assert_contains(name, report_text, "profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt")
+    assert_contains(name, report_text, "profile-2:dropped:--ipset=/opt/zapret2/ipset/ipset-all.txt")
     assert_not_contains(name, text, "safe-template:duplicate")
     tests.append(name)
 
@@ -1715,8 +1718,8 @@ def main():
     ap.add_argument("--strategy-template", choices=["none", "safe", "compact-safe"], default="none",
                     help="Conversion style. none/safe preserve source profiles; compact-safe builds a compact normalized template.")
 
-    ap.add_argument("--strip-hostlists", action="store_true",
-                    help="Compatibility mode: drop hostlist/ipset options and report them instead of preserving them.")
+    ap.add_argument("--keep-hostlists", action="store_true",
+                    help="Keep file-backed --hostlist/--ipset options instead of dropping them.")
 
     ap.add_argument("--report", default=None,
                     help="Файл отчёта о выкинутых/сомнительных опциях")
@@ -1748,7 +1751,7 @@ def main():
         prefer_defaults=args.prefer_default_blobs,
         autofilter_l7=not args.no_autofilter_l7,
         strategy_template=args.strategy_template,
-        strip_hostlists=args.strip_hostlists,
+        keep_hostlists=args.keep_hostlists,
     )
 
     if args.dry_run and not any(x.startswith("--dry-run") for x in converted):
