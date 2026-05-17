@@ -102,8 +102,6 @@ NFQWS2_PROFILE_PREFIXES = (
     "--out-range",
     "--in-range",
     "--filter-ssid",
-    # Flowseal/zapret1 option. Keep explicit, do not silently lose it.
-    "--ip-id",
 )
 
 OLD_DPI_PREFIX = "--dpi-desync"
@@ -196,6 +194,7 @@ SUPPORTED_DPI_OPTIONS = {
     "--dpi-desync-fake-discord",
     "--dpi-desync-fake-stun",
     "--dpi-desync-any-protocol",
+    "--ip-id",
 }
 
 BATCH_VAR_RE = re.compile(r"%[A-Za-z0-9_]+%|![A-Za-z0-9_]+!")
@@ -483,6 +482,11 @@ def classify_profile(profile: Profile) -> Profile:
             add_dpi(profile, k, "" if v is None else v)
             continue
 
+        # Flowseal/zapret1 option. In nfqws2 this is a lua-desync arg.
+        if k == "--ip-id":
+            add_dpi(profile, k, "" if v is None else v)
+            continue
+
         # Old HTTP modifiers from zapret1/winws.
         if k in ("--hostcase", "--domcase", "--hostspell", "--methodeol", "--unixeol"):
             profile.old_http_mods[k] = "" if v is None else v
@@ -734,6 +738,13 @@ def add_standard_fooling_args(profile: Profile, args: list[str], warnings: list[
     v = dpi_last(profile, "--dpi-desync-ipfrag-pos-udp")
     if v:
         args.append(f"ipfrag_pos_udp={v}")
+
+    ip_id = dpi_last(profile, "--ip-id")
+    if ip_id:
+        if ip_id == "seqgroup":
+            warnings.append("manual-ip-id:seqgroup")
+        else:
+            args.append(f"ip_id={ip_id}")
 
     repeats = dpi_last(profile, "--dpi-desync-repeats")
     if repeats:
@@ -1089,6 +1100,15 @@ def run_self_tests():
     assert_contains(name, text, "--lua-desync=fake")
     assert_contains(name, text, "--blob=fake_tls_1:@/opt/zapret2/binaries/tls.bin")
     assert_not_contains(name, text, '@"/opt')
+    tests.append(name)
+
+    # A2. zapret1 --ip-id is nfqws2 lua-desync ip_id arg.
+    name = "A2"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --ip-id=zero --dpi-desync=fake --dpi-desync-fake-tls="%BIN%tls.bin"'
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries")
+    text = "\n".join(converted + warnings + report)
+    assert_contains(name, text, "--lua-desync=fake:ip_id=zero:blob=fake_tls_1")
+    assert_not_contains(name, text, "--ip-id=zero")
     tests.append(name)
 
     # B. ^! handling.
