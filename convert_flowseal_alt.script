@@ -3,7 +3,7 @@ set -euo pipefail
 
 # === Settings ===
 
-CONVERTER="./flowseal_winws_to_nfqws2_smart_fixed.py"
+CONVERTER="./flowseal_winws_to_nfqws2_no_hostlists.py"
 OUT_DIR="./converted_alt"
 
 BIN_DIR="/opt/zapret2/binaries"

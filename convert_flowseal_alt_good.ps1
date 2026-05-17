@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$Converter = ".\flowseal_winws_to_nfqws2_smart_v2_dedup_newlines.py"
+$Converter = ".\flowseal_winws_to_nfqws2_no_hostlists.py"
 $OutDir = ".\converted_alt"
 
 $BinDir = "/opt/zapret2/files/fake/"
