@@ -5,6 +5,8 @@ $OutDir = ".\converted_alt"
 
 $BinDir = "/opt/zapret2/files/fake/"
 $ListsDir = "/opt/zapret2/ipset"
+$StrategyTemplate = "safe"
+$PreferDefaultBlobs = $true
 
 $BaseUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main"
 
@@ -70,13 +72,22 @@ foreach ($File in $Files) {
 
     Write-Host "    Convert: $OutConf"
 
-    & $PythonCmd.Source $Converter `
-        $LocalBat `
-        --config-style `
-        --bin-dir $BinDir `
-        --lists-dir $ListsDir `
-        -o $OutConf `
-        --report $Report
+    $ConvertArgs = @(
+        $Converter,
+        $LocalBat,
+        "--config-style",
+        "--strategy-template", $StrategyTemplate,
+        "--bin-dir", $BinDir,
+        "--lists-dir", $ListsDir,
+        "-o", $OutConf,
+        "--report", $Report
+    )
+
+    if ($PreferDefaultBlobs) {
+        $ConvertArgs += "--prefer-default-blobs"
+    }
+
+    & $PythonCmd.Source @ConvertArgs
 
     if ($LASTEXITCODE -ne 0) {
         throw "Conversion failed: $File"
@@ -89,6 +100,11 @@ foreach ($File in $Files) {
         "%GameFilterUDP%",
         "--wf-tcp",
         "--wf-udp",
+        "--dpi-desync",
+        "--hostlist",
+        "--payload=unknown",
+        "--payload=unknown_udp",
+        "@!",
         "winws.exe",
         "start `"",
         "@echo",

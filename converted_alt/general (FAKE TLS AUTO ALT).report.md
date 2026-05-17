@@ -1,9 +1,7 @@
 # Conversion report
 
 ## Warnings
-- manual-cutoff:n3
-- manual-cutoff:n3
-- manual-cutoff:n2
+- none
 
 ## Dropped
 - profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt

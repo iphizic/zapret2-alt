@@ -1,14 +1,7 @@
 # Conversion report
 
 ## Warnings
-- profile-3:duplicate-dpi-option:--dpi-desync-fake-tls=0x00000000,!
-- profile-4:duplicate-dpi-option:--dpi-desync-fake-tls=0x00000000,!
-- profile-5:duplicate-dpi-option:--dpi-desync-fake-tls=0x00000000,!
-- profile-7:duplicate-dpi-option:--dpi-desync-fake-tls=0x00000000,!
-- profile-8:duplicate-dpi-option:--dpi-desync-fake-tls=0x00000000,!
-- manual-cutoff:n4
-- manual-cutoff:n4
-- manual-cutoff:n2
+- none
 
 ## Dropped
 - profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt

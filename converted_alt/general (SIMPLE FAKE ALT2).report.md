@@ -1,11 +1,7 @@
 # Conversion report
 
 ## Warnings
-- profile-5:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/files/fake/stun.bin,/opt/zapret2/files/fake/tls_clienthello_max_ru.bin
-- profile-7:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/files/fake/stun.bin,/opt/zapret2/files/fake/tls_clienthello_max_ru.bin
-- profile-8:duplicate-dpi-option:--dpi-desync-fake-tls=/opt/zapret2/files/fake/stun.bin,/opt/zapret2/files/fake/tls_clienthello_max_ru.bin
-- manual-cutoff:n5
-- manual-cutoff:n3
+- safe-template:duplicate-fake-tls
 
 ## Dropped
 - profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt

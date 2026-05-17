@@ -453,6 +453,18 @@ def dpi_last(profile: Profile, key: str, default=None):
     return vals[-1] if vals else default
 
 
+def is_usable_blob_value(value: str) -> bool:
+    value = dequote(value).strip()
+    return bool(value) and value != "!"
+
+
+def dpi_last_usable_blob(profile: Profile, key: str) -> str | None:
+    for value in reversed(dpi_values(profile, key)):
+        if is_usable_blob_value(value):
+            return value
+    return None
+
+
 def classify_profile(profile: Profile) -> Profile:
     kept = []
 
@@ -618,19 +630,22 @@ def fake_blob_for_payload(
 
     # L7-specific Flowseal fake blobs.
     if "discord" in l7s and dpi_values(profile, "--dpi-desync-fake-discord"):
-        vals = dpi_values(profile, "--dpi-desync-fake-discord")
-        return blobs.add("fake_discord", vals[-1])
+        val = dpi_last_usable_blob(profile, "--dpi-desync-fake-discord")
+        if val:
+            return blobs.add("fake_discord", val)
 
     if "stun" in l7s and dpi_values(profile, "--dpi-desync-fake-stun"):
-        vals = dpi_values(profile, "--dpi-desync-fake-stun")
-        return blobs.add("fake_stun", vals[-1])
+        val = dpi_last_usable_blob(profile, "--dpi-desync-fake-stun")
+        if val:
+            return blobs.add("fake_stun", val)
 
     if not payload:
         return None
 
     if payload == "unknown_udp" and dpi_values(profile, "--dpi-desync-fake-unknown-udp"):
-        vals = dpi_values(profile, "--dpi-desync-fake-unknown-udp")
-        return blobs.add("fake_unknown_udp", vals[-1])
+        val = dpi_last_usable_blob(profile, "--dpi-desync-fake-unknown-udp")
+        if val:
+            return blobs.add("fake_unknown_udp", val)
 
     # Useful if Linux does not have files from Windows Flowseal bundle.
     if prefer_defaults and payload in DEFAULT_BLOB_BY_PAYLOAD:
@@ -639,9 +654,9 @@ def fake_blob_for_payload(
     for opt, p in PAYLOAD_BY_FAKE_OPT.items():
         if p != payload:
             continue
-        vals = dpi_values(profile, opt)
-        if vals:
-            return blobs.add(blob_prefix_by_payload(payload), vals[-1])
+        val = dpi_last_usable_blob(profile, opt)
+        if val:
+            return blobs.add(blob_prefix_by_payload(payload), val)
 
     # If fake is present without concrete file.
     if payload in DEFAULT_BLOB_BY_PAYLOAD:
@@ -697,6 +712,301 @@ def split_l7_specific_profiles(profile: Profile, warnings: list[str]) -> list[Pr
         warnings.append("multiple-l7-fake-blobs:using-stun-blob-discord-left-unused")
 
     return [profile]
+
+
+# ----------------------------
+# Safe strategy template
+# ----------------------------
+
+def port_filter_includes(value: str | None, port: int) -> bool:
+    if not value:
+        return False
+
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            left, right = part.split("-", 1)
+            if left.isdigit() and right.isdigit() and int(left) <= port <= int(right):
+                return True
+        elif part.isdigit() and int(part) == port:
+            return True
+
+    return False
+
+
+def find_wide_udp_range(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    preferred = ("49152-65535", "50000-50100", "1024-65535")
+    parts = [x.strip() for x in value.split(",") if x.strip()]
+
+    for wanted in preferred:
+        if wanted in parts:
+            return wanted
+
+    for part in parts:
+        if "-" not in part:
+            continue
+        left, right = part.split("-", 1)
+        if left.isdigit() and right.isdigit() and int(right) - int(left) + 1 > 1000:
+            return part
+
+    return None
+
+
+def profile_l7_values(profile: Profile) -> set[str]:
+    out = set()
+    for t in profile.globals_or_filters:
+        k, v = key_val(t)
+        if k == "--filter-l7" and v:
+            out.update(x.strip() for x in v.split(",") if x.strip())
+    return out
+
+
+def filter_values(profile: Profile, key: str) -> list[str]:
+    out = []
+    for t in profile.globals_or_filters:
+        k, v = key_val(t)
+        if k == key and v:
+            out.append(v)
+    return out
+
+
+def first_dpi_last(profiles: list[Profile], key: str) -> str | None:
+    for p in profiles:
+        v = dpi_last(p, key)
+        if v:
+            return v
+    return None
+
+
+def collect_usable_fake_values(profiles: list[Profile], key: str) -> list[str]:
+    out = []
+    seen = set()
+
+    for p in profiles:
+        for value in dpi_values(p, key):
+            if not is_usable_blob_value(value):
+                continue
+            value = dequote(value)
+            if value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+
+    return out
+
+
+@dataclass
+class SafeFeatures:
+    tcp80: bool = False
+    tcp443: bool = False
+    udp443: bool = False
+    has_tls: bool = False
+    has_http: bool = False
+    has_quic: bool = False
+    has_discord_stun: bool = False
+    wide_udp_range: str | None = None
+    repeats: str | None = None
+    split_pos: str | None = None
+    fake_tls: list[str] = field(default_factory=list)
+    fake_quic: list[str] = field(default_factory=list)
+    fake_http: list[str] = field(default_factory=list)
+    fake_discord: list[str] = field(default_factory=list)
+    fake_stun: list[str] = field(default_factory=list)
+
+
+def extract_profile_features(profiles: list[Profile]) -> SafeFeatures:
+    features = SafeFeatures()
+
+    features.repeats = first_dpi_last(profiles, "--dpi-desync-repeats")
+    features.split_pos = first_dpi_last(profiles, "--dpi-desync-split-pos")
+    features.fake_tls = collect_usable_fake_values(profiles, "--dpi-desync-fake-tls")
+    features.fake_quic = collect_usable_fake_values(profiles, "--dpi-desync-fake-quic")
+    features.fake_http = collect_usable_fake_values(profiles, "--dpi-desync-fake-http")
+    features.fake_discord = collect_usable_fake_values(profiles, "--dpi-desync-fake-discord")
+    features.fake_stun = collect_usable_fake_values(profiles, "--dpi-desync-fake-stun")
+
+    for p in profiles:
+        l7s = profile_l7_values(p)
+        features.has_tls = features.has_tls or "tls" in l7s
+        features.has_http = features.has_http or "http" in l7s
+        features.has_quic = features.has_quic or "quic" in l7s
+        features.has_discord_stun = features.has_discord_stun or bool(
+            {"discord", "stun"} & l7s
+        )
+
+        for tcp in filter_values(p, "--filter-tcp"):
+            features.tcp80 = features.tcp80 or port_filter_includes(tcp, 80)
+            features.tcp443 = features.tcp443 or port_filter_includes(tcp, 443)
+
+        for udp in filter_values(p, "--filter-udp"):
+            features.udp443 = features.udp443 or port_filter_includes(udp, 443)
+
+            wide = find_wide_udp_range(udp)
+            if wide and not features.wide_udp_range:
+                features.wide_udp_range = wide
+
+            udp_parts = {x.strip() for x in udp.split(",") if x.strip()}
+            if udp_parts & {"19294-19344", "50000-50100", "49152-65535"}:
+                features.has_discord_stun = True
+
+    features.has_tls = features.has_tls or bool(features.fake_tls)
+    features.has_http = features.has_http or bool(features.fake_http)
+    features.has_quic = features.has_quic or bool(features.fake_quic)
+    features.has_discord_stun = features.has_discord_stun or bool(
+        features.fake_discord or features.fake_stun
+    )
+
+    return features
+
+
+def choose_safe_blob(
+    blobs: BlobStore,
+    payload: str,
+    prefix: str,
+    fake_values: list[str],
+    prefer_defaults: bool,
+) -> str:
+    if prefer_defaults or not fake_values:
+        default = DEFAULT_BLOB_BY_PAYLOAD.get(payload)
+        if default:
+            return default
+
+    return blobs.add(prefix, fake_values[0])
+
+
+def append_safe_block(tokens: list[str], block: list[str]):
+    if tokens:
+        tokens.append("--new")
+    tokens.extend(block)
+
+
+def build_safe_strategy(
+    profiles: list[Profile],
+    prefer_defaults: bool,
+    autofilter_l7: bool = True,
+) -> tuple[list[str], list[str], list[str]]:
+    del autofilter_l7
+
+    warnings = []
+    report = []
+    classified = []
+
+    for idx, raw_profile in enumerate(profiles, start=1):
+        p = classify_profile(raw_profile)
+        warn_unhandled_dpi(p, idx, warnings)
+        classified.append(p)
+
+        for x in p.dropped:
+            report.append(f"profile-{idx}:dropped:{x}")
+
+    features = extract_profile_features(classified)
+
+    if len(features.fake_tls) > 1:
+        warnings.append("safe-template:duplicate-fake-tls")
+    if len(features.fake_quic) > 1:
+        warnings.append("safe-template:duplicate-fake-quic")
+    if len(features.fake_http) > 1:
+        warnings.append("safe-template:duplicate-fake-http")
+
+    blobs = BlobStore()
+    tokens = []
+
+    if features.tcp443 or features.has_tls:
+        tls_blob = choose_safe_blob(
+            blobs,
+            "tls_client_hello",
+            "fake_tls",
+            features.fake_tls,
+            prefer_defaults,
+        )
+        fake_args = [
+            "fake",
+            f"blob={tls_blob}",
+            "ip_ttl=1",
+            "ip6_ttl=1",
+            "tls_mod=rnd,rndsni,padencap",
+        ]
+        if features.repeats:
+            fake_args.append(f"repeats={features.repeats}")
+
+        append_safe_block(tokens, [
+            "--filter-tcp=443",
+            "--filter-l7=tls",
+            "--out-range=-d10",
+            "--payload=tls_client_hello",
+            "--lua-desync=" + ":".join(fake_args),
+            f"--lua-desync=multidisorder:pos={features.split_pos or '3'}",
+        ])
+
+    if features.udp443 or features.has_quic:
+        quic_blob = choose_safe_blob(
+            blobs,
+            "quic_initial",
+            "fake_quic",
+            features.fake_quic,
+            prefer_defaults,
+        )
+        append_safe_block(tokens, [
+            "--filter-udp=443",
+            "--filter-l7=quic",
+            "--out-range=-d10",
+            "--payload=quic_initial",
+            f"--lua-desync=fake:blob={quic_blob}:repeats={features.repeats or '11'}",
+        ])
+
+    if features.tcp80 or features.has_http:
+        http_blob = choose_safe_blob(
+            blobs,
+            "http_req",
+            "fake_http",
+            features.fake_http,
+            prefer_defaults,
+        )
+        fake_args = ["fake", f"blob={http_blob}", "ip_ttl=1", "ip6_ttl=1"]
+        if features.repeats:
+            fake_args.append(f"repeats={features.repeats}")
+
+        append_safe_block(tokens, [
+            "--filter-tcp=80",
+            "--filter-l7=http",
+            "--out-range=-d10",
+            "--payload=http_req",
+            "--lua-desync=" + ":".join(fake_args),
+            f"--lua-desync=fakedsplit:pos={features.split_pos or '2'}",
+        ])
+
+    if features.has_discord_stun:
+        if features.fake_discord and not prefer_defaults:
+            discord_blob = blobs.add("fake_discord", features.fake_discord[0])
+            if features.fake_stun:
+                warnings.append("safe-template:multiple-discord-stun-blobs:using-discord")
+        elif features.fake_stun and not prefer_defaults:
+            discord_blob = blobs.add("fake_stun", features.fake_stun[0])
+        else:
+            discord_blob = "0x00000000000000000000000000000000"
+
+        append_safe_block(tokens, [
+            "--filter-l7=stun,discord",
+            "--payload=stun,discord_ip_discovery",
+            f"--lua-desync=fake:blob={discord_blob}:repeats={features.repeats or '2'}",
+        ])
+
+    if features.wide_udp_range or features.has_discord_stun:
+        append_safe_block(tokens, [
+            f"--filter-udp={features.wide_udp_range or '49152-65535'}",
+            "--out-range=<n2",
+            "--lua-desync=fake:blob=0x00:payload=~empty:repeats=10",
+        ])
+
+    if not tokens:
+        warnings.append("safe-template:no-known-profile-detected")
+
+    return blobs.blobs + tokens, warnings, report
 
 
 # ----------------------------
@@ -1044,6 +1354,7 @@ def convert_text(
     root_dir: str = ".",
     prefer_defaults: bool = False,
     autofilter_l7: bool = True,
+    strategy_template: str = "none",
 ) -> tuple[list[str], list[str], list[str]]:
     all_tokens = []
 
@@ -1060,6 +1371,14 @@ def convert_text(
             all_tokens.extend(tokenize_command(cmd))
 
     profiles = split_profiles(all_tokens)
+
+    if strategy_template == "safe":
+        return build_safe_strategy(
+            profiles,
+            prefer_defaults=prefer_defaults,
+            autofilter_l7=autofilter_l7,
+        )
+
     return convert_profiles(
         profiles,
         prefer_defaults=prefer_defaults,
@@ -1111,14 +1430,14 @@ def run_self_tests():
     assert_not_contains(name, text, "--ip-id=zero")
     tests.append(name)
 
-    # B. ^! handling.
+    # B. ^! handling: literal ! is not a usable fake file/blob value.
     name = "B"
-    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --dpi-desync=fake --dpi-desync-fake-tls=^!'
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --dpi-desync=fake --dpi-desync-fake-tls=0x00000000 --dpi-desync-fake-tls=^!'
     converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries")
     text = "\n".join(converted + warnings + report)
-    assert_contains(name, text, "!")
+    assert_contains(name, text, "--blob=fake_tls_1:0x00000000")
     assert_not_contains(name, text, "^!")
-    assert_not_contains(name, text, "^")
+    assert_not_contains(name, text, "@!")
     tests.append(name)
 
     # C. Unexpanded batch vars must be dropped from valid filter opts.
@@ -1210,6 +1529,78 @@ def run_self_tests():
     assert_contains(name, report_text, "profile-1:dropped:--hostlist-auto=/tmp/auto.txt")
     tests.append(name)
 
+    # J. Safe TLS template.
+    name = "J"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-fake-tls="%BIN%tls.bin" --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6'
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", strategy_template="safe")
+    text = "\n".join(converted)
+    assert_contains(name, text, "--filter-tcp=443")
+    assert_contains(name, text, "--filter-l7=tls")
+    assert_contains(name, text, "--payload=tls_client_hello")
+    assert_contains(name, text, "--lua-desync=fake:")
+    assert_contains(name, text, "blob=fake_tls_")
+    assert_contains(name, text, "repeats=6")
+    assert_contains(name, text, "--lua-desync=multidisorder:pos=1,midsld")
+    assert_not_contains(name, text, "--dpi-desync")
+    tests.append(name)
+
+    # K. Safe QUIC template with default blob preference.
+    name = "K"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=443 --filter-l7=quic --dpi-desync=fake --dpi-desync-fake-quic="%BIN%quic.bin"'
+    converted, warnings, report = convert_text(
+        inp,
+        bin_dir="/opt/zapret2/binaries",
+        strategy_template="safe",
+        prefer_defaults=True,
+    )
+    text = "\n".join(converted)
+    assert_contains(name, text, "--filter-udp=443")
+    assert_contains(name, text, "--filter-l7=quic")
+    assert_contains(name, text, "--payload=quic_initial")
+    assert_contains(name, text, "fake_default_quic")
+    tests.append(name)
+
+    # L. Safe Discord/STUN template.
+    name = "L"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-fake-discord="%BIN%discord.bin" --dpi-desync-fake-stun="%BIN%stun.bin" --dpi-desync-repeats=6'
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", strategy_template="safe")
+    text = "\n".join(converted + warnings)
+    assert_contains(name, text, "--filter-l7=stun,discord")
+    assert_contains(name, text, "--payload=stun,discord_ip_discovery")
+    assert_contains(name, text, "repeats=6")
+    assert_contains(name, text, "--blob=fake_discord_")
+    assert_contains(name, text, "multiple-discord-stun-blobs")
+    tests.append(name)
+
+    # M. Safe high UDP template.
+    name = "M"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=49152-65535 --dpi-desync=fake'
+    converted, warnings, report = convert_text(inp, strategy_template="safe")
+    text = "\n".join(converted)
+    assert_contains(name, text, "--filter-udp=49152-65535")
+    assert_contains(name, text, "--out-range=<n2")
+    assert_contains(name, text, "payload=~empty")
+    assert_contains(name, text, "blob=0x00")
+    tests.append(name)
+
+    # N. Safe template still strips hostlists and reports them.
+    name = "N"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --dpi-desync=fake --dpi-desync-fake-tls="%BIN%tls.bin"'
+    converted, warnings, report = convert_text(
+        inp,
+        bin_dir="/opt/zapret2/binaries",
+        lists_dir="/opt/zapret2/ipset",
+        strategy_template="safe",
+    )
+    output_text = "\n".join(converted)
+    report_text = "\n".join(report)
+    assert_not_contains(name, output_text, "--hostlist")
+    assert_not_contains(name, output_text, "list-general.txt")
+    assert_contains(name, report_text, "profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt")
+    for bad in ("--dpi-desync", "--wf-tcp", "--wf-udp", "winws.exe", 'start "', "@echo", "chcp", "cd /d", "%BIN%", "%LISTS%", "%GameFilterTCP%", "%GameFilterUDP%", "^"):
+        assert_not_contains(name, output_text, bad)
+    tests.append(name)
+
     print("SELF-TEST OK")
     print("passed: " + ", ".join(tests))
 
@@ -1246,6 +1637,9 @@ def main():
     ap.add_argument("--no-autofilter-l7", action="store_true",
                     help="Не добавлять --filter-l7 автоматически")
 
+    ap.add_argument("--strategy-template", choices=["none", "safe"], default="none",
+                    help="Генерировать нормализованный шаблон стратегии вместо механической конвертации")
+
     ap.add_argument("--report", default=None,
                     help="Файл отчёта о выкинутых/сомнительных опциях")
 
@@ -1275,6 +1669,7 @@ def main():
         root_dir=args.root_dir,
         prefer_defaults=args.prefer_default_blobs,
         autofilter_l7=not args.no_autofilter_l7,
+        strategy_template=args.strategy_template,
     )
 
     if args.dry_run and not any(x.startswith("--dry-run") for x in converted):
