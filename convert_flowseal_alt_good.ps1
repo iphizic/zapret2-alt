@@ -36,19 +36,38 @@ if (-not (Test-Path $Converter)) {
     throw "Converter not found: $Converter"
 }
 
-$PythonCmd = Get-Command python -ErrorAction SilentlyContinue
-if (-not $PythonCmd) {
-    $PythonCmd = Get-Command py -ErrorAction SilentlyContinue
+$UvCmd = Get-Command uv -ErrorAction SilentlyContinue
+$PythonCmd = $null
+
+if (-not $UvCmd) {
+    $PythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $PythonCmd) {
+        $PythonCmd = Get-Command py -ErrorAction SilentlyContinue
+    }
 }
 
-if (-not $PythonCmd) {
+if (-not $UvCmd -and -not $PythonCmd) {
     throw "Python not found in PATH"
+}
+
+function Invoke-ConverterPython {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $Args
+    )
+
+    if ($UvCmd) {
+        & $UvCmd.Source run --no-project python @Args
+    }
+    else {
+        & $PythonCmd.Source @Args
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host "[*] Running converter self-test"
-& $PythonCmd.Source $Converter --self-test
+Invoke-ConverterPython $Converter --self-test
 
 if ($LASTEXITCODE -ne 0) {
     throw "Converter self-test failed"
@@ -87,7 +106,7 @@ foreach ($File in $Files) {
         $ConvertArgs += "--prefer-default-blobs"
     }
 
-    & $PythonCmd.Source @ConvertArgs
+    Invoke-ConverterPython @ConvertArgs
 
     if ($LASTEXITCODE -ne 0) {
         throw "Conversion failed: $File"
@@ -101,7 +120,6 @@ foreach ($File in $Files) {
         "--wf-tcp",
         "--wf-udp",
         "--dpi-desync",
-        "--hostlist",
         "--payload=unknown",
         "--payload=unknown_udp",
         "@!",
@@ -113,19 +131,21 @@ foreach ($File in $Files) {
     )
 
     $Content = Get-Content $OutConf -Raw
+    $ContentToCheck = (($Content -split "`r?`n") |
+        Where-Object { -not $_.TrimStart().StartsWith("#") }) -join "`n"
     $FoundBad = @()
 
     foreach ($Pattern in $BadPatterns) {
-        if ($Content.Contains($Pattern)) {
+        if ($ContentToCheck.Contains($Pattern)) {
             $FoundBad += $Pattern
         }
     }
 
-    if ($Content -match "\^") {
+    if ($ContentToCheck -match "\^") {
         $FoundBad += "^"
     }
 
-    if ($Content -match '--[^=\s]+="[^"]+"') {
+    if ($ContentToCheck -match '--[^=\s]+="[^"]+"') {
         $FoundBad += 'quoted --key="value"'
     }
 

@@ -21,8 +21,10 @@ DROP_PREFIXES = (
     "--nlm-list",
 )
 
-# Hostlists are intentionally stripped for target nfqws2 configs.
-# The resulting strategy keeps protocol/L7 filters and desync logic only.
+# Hostlists are valid nfqws2 profile options. Older versions of this
+# converter stripped them, which made converted Flowseal profiles much broader
+# than the original Windows strategy. Keep them by default and expose an
+# explicit --strip-hostlists compatibility switch for minimal configs.
 HOSTLIST_PREFIXES = (
     "--ipset",
     "--ipset-exclude",
@@ -311,6 +313,30 @@ def sanitized_port_filter_token(key: str, value: str | None) -> str | None:
     return f"{mapped_key}={value}"
 
 
+def cutoff_to_out_range(cutoff: str | None) -> str | None:
+    if not cutoff:
+        return None
+
+    cutoff = cutoff.strip()
+    if not cutoff:
+        return None
+
+    if cutoff.startswith(("<", ">", "-", "+")):
+        return cutoff
+
+    # zapret1 cutoff=nN is commonly used as "until packet N"; nfqws2 expresses
+    # the same style as an output packet range.
+    if re.fullmatch(r"n\d+", cutoff):
+        return f"<{cutoff}"
+
+    # cutoff=dN means "before/at data offset N" in Flowseal strategies. This is
+    # the closest nfqws2 range form used by the existing safe template.
+    if re.fullmatch(r"d\d+", cutoff):
+        return f"-{cutoff}"
+
+    return None
+
+
 def unescape_batch_carets(s: str) -> str:
     # After line-continuation carets are consumed, all remaining caret escapes
     # should be literalized: ^! -> !, ^X -> X. Drop a lone caret if present.
@@ -465,7 +491,7 @@ def dpi_last_usable_blob(profile: Profile, key: str) -> str | None:
     return None
 
 
-def classify_profile(profile: Profile) -> Profile:
+def classify_profile(profile: Profile, *, strip_hostlists: bool = False) -> Profile:
     kept = []
 
     for t in profile.globals_or_filters:
@@ -481,7 +507,7 @@ def classify_profile(profile: Profile) -> Profile:
             profile.dropped.append(t)
             continue
 
-        if is_prefix(k, HOSTLIST_PREFIXES):
+        if strip_hostlists and is_prefix(k, HOSTLIST_PREFIXES):
             profile.dropped.append(t)
             continue
 
@@ -889,6 +915,7 @@ def build_safe_strategy(
     profiles: list[Profile],
     prefer_defaults: bool,
     autofilter_l7: bool = True,
+    strip_hostlists: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     del autofilter_l7
 
@@ -897,7 +924,7 @@ def build_safe_strategy(
     classified = []
 
     for idx, raw_profile in enumerate(profiles, start=1):
-        p = classify_profile(raw_profile)
+        p = classify_profile(raw_profile, strip_hostlists=strip_hostlists)
         warn_unhandled_dpi(p, idx, warnings)
         classified.append(p)
 
@@ -1062,8 +1089,8 @@ def add_standard_fooling_args(profile: Profile, args: list[str], warnings: list[
 
     cutoff = dpi_last(profile, "--dpi-desync-cutoff")
     if cutoff:
-        # In nfqws2 this is usually better manually ported to --out-range/--in-range.
-        warnings.append(f"manual-cutoff:{cutoff}")
+        if not cutoff_to_out_range(cutoff):
+            warnings.append(f"manual-cutoff:{cutoff}")
 
 
 def add_split_args(profile: Profile, args: list[str], blobs: BlobStore):
@@ -1152,6 +1179,9 @@ def build_lua_instances(
 
         add_standard_fooling_args(profile, args, warnings)
 
+        if dpi_last(profile, "--dpi-desync-any-protocol") in ("1", "true", "yes"):
+            args.append("payload=~empty")
+
         if mode in (
             "multisplit",
             "multidisorder",
@@ -1235,6 +1265,7 @@ def convert_profiles(
     profiles: list[Profile],
     prefer_defaults: bool,
     autofilter_l7: bool,
+    strip_hostlists: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     blobs = BlobStore()
     result_profiles = []
@@ -1243,7 +1274,7 @@ def convert_profiles(
     effective_index = 0
 
     for original_idx, raw_profile in enumerate(profiles, start=1):
-        p = classify_profile(raw_profile)
+        p = classify_profile(raw_profile, strip_hostlists=strip_hostlists)
         warn_duplicate_dpi(p, original_idx, warnings)
         warn_unhandled_dpi(p, original_idx, warnings)
 
@@ -1259,6 +1290,10 @@ def convert_profiles(
                 prof_out.append(sub_profile.prefix_new)
 
             filters = list(sub_profile.globals_or_filters)
+
+            cutoff_range = cutoff_to_out_range(dpi_last(sub_profile, "--dpi-desync-cutoff"))
+            if cutoff_range and not has_option(filters, "--out-range"):
+                filters.append(f"--out-range={cutoff_range}")
 
             lua_instances, inferred_payload = build_lua_instances(
                 sub_profile,
@@ -1355,6 +1390,7 @@ def convert_text(
     prefer_defaults: bool = False,
     autofilter_l7: bool = True,
     strategy_template: str = "none",
+    strip_hostlists: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     all_tokens = []
 
@@ -1372,17 +1408,23 @@ def convert_text(
 
     profiles = split_profiles(all_tokens)
 
-    if strategy_template == "safe":
+    if strategy_template == "compact-safe":
         return build_safe_strategy(
             profiles,
             prefer_defaults=prefer_defaults,
             autofilter_l7=autofilter_l7,
+            strip_hostlists=strip_hostlists,
         )
 
+    # "safe" used to mean a compact synthetic template. That discarded too much
+    # Flowseal intent, especially hostlists/ipsets and per-ALT differences. Keep
+    # the name as a compatibility-friendly quality mode: preserve profiles, only
+    # translate known zapret1/winws options, and drop invalid leftovers.
     return convert_profiles(
         profiles,
         prefer_defaults=prefer_defaults,
         autofilter_l7=autofilter_l7,
+        strip_hostlists=strip_hostlists,
     )
 
 
@@ -1516,10 +1558,15 @@ def run_self_tests():
     assert_contains(name, formatted, "--lua-desync=fake\n\n--new\n--filter-udp=443")
     tests.append(name)
 
-    # H. Hostlist options must be stripped from output and reported as dropped.
+    # H. Hostlist options can be stripped explicitly for compatibility.
     name = "H"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --hostlist-exclude-domains=example.org --hostlist-auto=/tmp/auto.txt --dpi-desync=fake --dpi-desync-fake-tls="%BIN%tls.bin"'
-    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", lists_dir="/opt/zapret2/ipset")
+    converted, warnings, report = convert_text(
+        inp,
+        bin_dir="/opt/zapret2/binaries",
+        lists_dir="/opt/zapret2/ipset",
+        strip_hostlists=True,
+    )
     output_text = "\n".join(converted)
     report_text = "\n".join(report)
     assert_not_contains(name, output_text, "--hostlist")
@@ -1529,10 +1576,20 @@ def run_self_tests():
     assert_contains(name, report_text, "profile-1:dropped:--hostlist-auto=/tmp/auto.txt")
     tests.append(name)
 
-    # J. Safe TLS template.
+    # I. Hostlist/ipset options are preserved by default for higher fidelity.
+    name = "I"
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", lists_dir="/opt/zapret2/ipset")
+    output_text = "\n".join(converted)
+    report_text = "\n".join(report)
+    assert_contains(name, output_text, "--hostlist=/opt/zapret2/ipset/list-general.txt")
+    assert_contains(name, output_text, "--hostlist-exclude-domains=example.org")
+    assert_not_contains(name, report_text, "profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt")
+    tests.append(name)
+
+    # J. Compact safe TLS template.
     name = "J"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-fake-tls="%BIN%tls.bin" --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6'
-    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", strategy_template="safe")
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", strategy_template="compact-safe")
     text = "\n".join(converted)
     assert_contains(name, text, "--filter-tcp=443")
     assert_contains(name, text, "--filter-l7=tls")
@@ -1544,13 +1601,13 @@ def run_self_tests():
     assert_not_contains(name, text, "--dpi-desync")
     tests.append(name)
 
-    # K. Safe QUIC template with default blob preference.
+    # K. Compact safe QUIC template with default blob preference.
     name = "K"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=443 --filter-l7=quic --dpi-desync=fake --dpi-desync-fake-quic="%BIN%quic.bin"'
     converted, warnings, report = convert_text(
         inp,
         bin_dir="/opt/zapret2/binaries",
-        strategy_template="safe",
+        strategy_template="compact-safe",
         prefer_defaults=True,
     )
     text = "\n".join(converted)
@@ -1560,10 +1617,10 @@ def run_self_tests():
     assert_contains(name, text, "fake_default_quic")
     tests.append(name)
 
-    # L. Safe Discord/STUN template.
+    # L. Compact safe Discord/STUN template.
     name = "L"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-fake-discord="%BIN%discord.bin" --dpi-desync-fake-stun="%BIN%stun.bin" --dpi-desync-repeats=6'
-    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", strategy_template="safe")
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries", strategy_template="compact-safe")
     text = "\n".join(converted + warnings)
     assert_contains(name, text, "--filter-l7=stun,discord")
     assert_contains(name, text, "--payload=stun,discord_ip_discovery")
@@ -1572,10 +1629,10 @@ def run_self_tests():
     assert_contains(name, text, "multiple-discord-stun-blobs")
     tests.append(name)
 
-    # M. Safe high UDP template.
+    # M. Compact safe high UDP template.
     name = "M"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=49152-65535 --dpi-desync=fake'
-    converted, warnings, report = convert_text(inp, strategy_template="safe")
+    converted, warnings, report = convert_text(inp, strategy_template="compact-safe")
     text = "\n".join(converted)
     assert_contains(name, text, "--filter-udp=49152-65535")
     assert_contains(name, text, "--out-range=<n2")
@@ -1583,14 +1640,15 @@ def run_self_tests():
     assert_contains(name, text, "blob=0x00")
     tests.append(name)
 
-    # N. Safe template still strips hostlists and reports them.
+    # N. Compact safe can still strip hostlists and report them.
     name = "N"
     inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --dpi-desync=fake --dpi-desync-fake-tls="%BIN%tls.bin"'
     converted, warnings, report = convert_text(
         inp,
         bin_dir="/opt/zapret2/binaries",
         lists_dir="/opt/zapret2/ipset",
-        strategy_template="safe",
+        strategy_template="compact-safe",
+        strip_hostlists=True,
     )
     output_text = "\n".join(converted)
     report_text = "\n".join(report)
@@ -1599,6 +1657,23 @@ def run_self_tests():
     assert_contains(name, report_text, "profile-1:dropped:--hostlist=/opt/zapret2/ipset/list-general.txt")
     for bad in ("--dpi-desync", "--wf-tcp", "--wf-udp", "winws.exe", 'start "', "@echo", "chcp", "cd /d", "%BIN%", "%LISTS%", "%GameFilterTCP%", "%GameFilterUDP%", "^"):
         assert_not_contains(name, output_text, bad)
+    tests.append(name)
+
+    # O. safe now means profile-preserving conversion for better Flowseal parity.
+    name = "O"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=443 --hostlist="%LISTS%list-general.txt" --dpi-desync=fake --dpi-desync-cutoff=n3 --dpi-desync-fake-tls="%BIN%tls.bin" --new --filter-udp=443 --ipset="%LISTS%ipset-all.txt" --dpi-desync=fake --dpi-desync-fake-quic="%BIN%quic.bin"'
+    converted, warnings, report = convert_text(
+        inp,
+        bin_dir="/opt/zapret2/binaries",
+        lists_dir="/opt/zapret2/ipset",
+        strategy_template="safe",
+    )
+    text = "\n".join(converted + warnings + report)
+    assert_contains(name, text, "--hostlist=/opt/zapret2/ipset/list-general.txt")
+    assert_contains(name, text, "--ipset=/opt/zapret2/ipset/ipset-all.txt")
+    assert_contains(name, text, "--out-range=<n3")
+    assert_contains(name, text, "--new")
+    assert_not_contains(name, text, "safe-template:duplicate")
     tests.append(name)
 
     print("SELF-TEST OK")
@@ -1637,8 +1712,11 @@ def main():
     ap.add_argument("--no-autofilter-l7", action="store_true",
                     help="Не добавлять --filter-l7 автоматически")
 
-    ap.add_argument("--strategy-template", choices=["none", "safe"], default="none",
-                    help="Генерировать нормализованный шаблон стратегии вместо механической конвертации")
+    ap.add_argument("--strategy-template", choices=["none", "safe", "compact-safe"], default="none",
+                    help="Conversion style. none/safe preserve source profiles; compact-safe builds a compact normalized template.")
+
+    ap.add_argument("--strip-hostlists", action="store_true",
+                    help="Compatibility mode: drop hostlist/ipset options and report them instead of preserving them.")
 
     ap.add_argument("--report", default=None,
                     help="Файл отчёта о выкинутых/сомнительных опциях")
@@ -1670,6 +1748,7 @@ def main():
         prefer_defaults=args.prefer_default_blobs,
         autofilter_l7=not args.no_autofilter_l7,
         strategy_template=args.strategy_template,
+        strip_hostlists=args.strip_hostlists,
     )
 
     if args.dry_run and not any(x.startswith("--dry-run") for x in converted):
