@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FLOWSEAL_ALT_DIR=${./converted_alt/}
+FLOWSEAL_ALT_DIR=<set_path>
 
 conf_to_params()
 {
