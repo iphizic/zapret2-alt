@@ -24,10 +24,10 @@ DROP_PREFIXES = (
 # Hostlists are intentionally stripped for target nfqws2 configs.
 # The resulting strategy keeps protocol/L7 filters and desync logic only.
 HOSTLIST_PREFIXES = (
+    "--ipset",
+    "--ipset-exclude",
     "--hostlist",
-    "--hostlist-domains",
     "--hostlist-exclude",
-    "--hostlist-exclude-domains",
     "--hostlist-auto",
     "--hostlist-auto-fail-threshold",
     "--hostlist-auto-fail-time",
@@ -283,6 +283,35 @@ def has_unexpanded_batch_var(token: str) -> bool:
     return bool(BATCH_VAR_RE.search(token))
 
 
+def strip_batch_vars_from_csv(value: str) -> str:
+    return ",".join(
+        x.strip()
+        for x in value.split(",")
+        if x.strip() and not has_unexpanded_batch_var(x)
+    )
+
+
+def sanitized_port_filter_token(key: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    mapped_key = {
+        "--wf-tcp": "--filter-tcp",
+        "--wf-udp": "--filter-udp",
+        "--filter-tcp": "--filter-tcp",
+        "--filter-udp": "--filter-udp",
+    }.get(key)
+
+    if not mapped_key:
+        return None
+
+    value = strip_batch_vars_from_csv(value)
+    if not value:
+        return None
+
+    return f"{mapped_key}={value}"
+
+
 def unescape_batch_carets(s: str) -> str:
     # After line-continuation carets are consumed, all remaining caret escapes
     # should be literalized: ^! -> !, ^X -> X. Drop a lone caret if present.
@@ -431,6 +460,11 @@ def classify_profile(profile: Profile) -> Profile:
     for t in profile.globals_or_filters:
         t = normalize_key_value_quotes(t)
         k, v = key_val(t)
+
+        port_filter = sanitized_port_filter_token(k, v)
+        if port_filter:
+            kept.append(port_filter)
+            continue
 
         if is_prefix(k, DROP_PREFIXES):
             profile.dropped.append(t)
@@ -1048,6 +1082,7 @@ def run_self_tests():
     text = "\n".join(converted)
     assert_not_contains(name, text, "--wf-tcp")
     assert_not_contains(name, text, "--wf-udp")
+    assert_contains(name, text, "--filter-udp=443")
     assert_contains(name, text, "--filter-tcp=443")
     assert_contains(name, text, "--lua-desync=fake")
     assert_contains(name, text, "--blob=fake_tls_1:@/opt/zapret2/binaries/tls.bin")
@@ -1072,6 +1107,17 @@ def run_self_tests():
     report_text = "\n".join(report)
     assert_not_contains(name, output_text, "%GameFilterUDP%")
     assert_contains(name, report_text, "profile-1:dropped:--filter-udp=%GameFilterUDP%")
+    tests.append(name)
+
+    # C2. Mixed concrete ports plus unexpanded vars should keep concrete ports.
+    name = "C2"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --wf-udp=443,19294-19344,50000-50100,%GameFilterUDP% --filter-tcp=443 --dpi-desync=fake'
+    converted, warnings, report = convert_text(inp)
+    output_text = "\n".join(converted)
+    report_text = "\n".join(report)
+    assert_contains(name, output_text, "--filter-udp=443,19294-19344,50000-50100")
+    assert_not_contains(name, output_text, "%GameFilterUDP%")
+    assert_not_contains(name, report_text, "profile-1:dropped:--wf-udp=443,19294-19344,50000-50100,%GameFilterUDP%")
     tests.append(name)
 
     # D. Discord/STUN fake blobs.
