@@ -547,8 +547,8 @@ def infer_payload(profile: Profile) -> str | None:
     # 1. Explicit fake-*.
     for opt, payload in PAYLOAD_BY_FAKE_OPT.items():
         if dpi_values(profile, opt):
-            # discord/stun are L7-specific blobs, not necessarily nfqws2 payload names.
-            if payload in ("discord", "stun"):
+            # unknown/discord/stun are blob hints, not nfqws2 payload classifiers.
+            if payload in ("unknown", "unknown_udp", "discord", "stun"):
                 continue
             return payload
 
@@ -564,10 +564,6 @@ def infer_payload(profile: Profile) -> str | None:
             return "quic_initial"
         if "dtls" in vals:
             return "dtls_client_hello"
-        if "stun" in vals:
-            return "unknown_udp"
-        if "discord" in vals:
-            return "unknown_udp"
 
     # 3. By ports.
     tcp = option_value(profile.globals_or_filters, "--filter-tcp")
@@ -579,10 +575,15 @@ def infer_payload(profile: Profile) -> str | None:
         return "http_req"
     if udp and "443" in udp:
         return "quic_initial"
-    if udp:
-        return "unknown_udp"
 
     return None
+
+
+def infer_blob_payload(profile: Profile, payload_filter: str | None) -> str | None:
+    for opt, payload in PAYLOAD_BY_FAKE_OPT.items():
+        if dpi_values(profile, opt):
+            return payload
+    return payload_filter
 
 
 def blob_prefix_by_payload(payload: str) -> str:
@@ -609,9 +610,6 @@ def fake_blob_for_payload(
     prefer_defaults: bool,
     warnings: list[str] | None = None,
 ) -> str | None:
-    if not payload:
-        return None
-
     l7s = l7_values(profile)
 
     # L7-specific Flowseal fake blobs.
@@ -622,6 +620,9 @@ def fake_blob_for_payload(
     if "stun" in l7s and dpi_values(profile, "--dpi-desync-fake-stun"):
         vals = dpi_values(profile, "--dpi-desync-fake-stun")
         return blobs.add("fake_stun", vals[-1])
+
+    if not payload:
+        return None
 
     if payload == "unknown_udp" and dpi_values(profile, "--dpi-desync-fake-unknown-udp"):
         vals = dpi_values(profile, "--dpi-desync-fake-unknown-udp")
@@ -814,9 +815,10 @@ def build_lua_instances(
         return [], None
 
     payload = infer_payload(profile)
+    blob_payload = infer_blob_payload(profile, payload)
     fake_blob = fake_blob_for_payload(
         profile,
-        payload,
+        blob_payload,
         blobs,
         prefer_defaults=prefer_defaults,
         warnings=warnings,
@@ -1118,6 +1120,25 @@ def run_self_tests():
     assert_contains(name, output_text, "--filter-udp=443,19294-19344,50000-50100")
     assert_not_contains(name, output_text, "%GameFilterUDP%")
     assert_not_contains(name, report_text, "profile-1:dropped:--wf-udp=443,19294-19344,50000-50100,%GameFilterUDP%")
+    tests.append(name)
+
+    # C3. unknown/unknown_udp are blob hints, not valid nfqws2 --payload values.
+    name = "C3"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-udp=19294-19344,50000-50100 --dpi-desync=fake --dpi-desync-fake-unknown-udp="%BIN%unknown_udp.bin"'
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries")
+    text = "\n".join(converted + warnings + report)
+    assert_contains(name, text, "--blob=fake_unknown_udp_1:@/opt/zapret2/binaries/unknown_udp.bin")
+    assert_contains(name, text, "--lua-desync=fake:blob=fake_unknown_udp_1")
+    assert_not_contains(name, text, "--payload=unknown_udp")
+    tests.append(name)
+
+    name = "C4"
+    inp = 'start "zapret" /min "%BIN%winws.exe" --filter-tcp=12345 --dpi-desync=fake --dpi-desync-fake-unknown="%BIN%unknown.bin"'
+    converted, warnings, report = convert_text(inp, bin_dir="/opt/zapret2/binaries")
+    text = "\n".join(converted + warnings + report)
+    assert_contains(name, text, "--blob=fake_unknown_1:@/opt/zapret2/binaries/unknown.bin")
+    assert_contains(name, text, "--lua-desync=fake:blob=fake_unknown_1")
+    assert_not_contains(name, text, "--payload=unknown")
     tests.append(name)
 
     # D. Discord/STUN fake blobs.
