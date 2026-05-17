@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === Settings ===
+
+CONVERTER="./flowseal_winws_to_nfqws2_smart_fixed.py"
+OUT_DIR="./converted_alt"
+
+BIN_DIR="/opt/zapret2/binaries"
+LISTS_DIR="/opt/zapret2/ipset"
+
+BASE_URL="https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main"
+
+FILES=(
+  "general (ALT).bat"
+  "general (ALT2).bat"
+  "general (ALT3).bat"
+  "general (ALT4).bat"
+  "general (ALT5).bat"
+  "general (ALT6).bat"
+  "general (ALT7).bat"
+  "general (ALT8).bat"
+  "general (ALT9).bat"
+  "general (ALT10).bat"
+  "general (ALT11).bat"
+
+  "general (FAKE TLS AUTO ALT).bat"
+  "general (FAKE TLS AUTO ALT2).bat"
+  "general (FAKE TLS AUTO ALT3).bat"
+
+  "general (SIMPLE FAKE ALT).bat"
+  "general (SIMPLE FAKE ALT2).bat"
+)
+
+# === Checks ===
+
+if [[ ! -f "$CONVERTER" ]]; then
+  echo "ERROR: converter not found: $CONVERTER" >&2
+  exit 1
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON="python"
+else
+  echo "ERROR: python/python3 not found in PATH" >&2
+  exit 1
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  DOWNLOADER="curl"
+elif command -v wget >/dev/null 2>&1; then
+  DOWNLOADER="wget"
+else
+  echo "ERROR: curl or wget is required" >&2
+  exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+
+echo "[*] Running converter self-test"
+"$PYTHON" "$CONVERTER" --self-test
+
+urlencode_path_component() {
+  local s="$1"
+  s="${s// /%20}"
+  s="${s//(/%28}"
+  s="${s//)/%29}"
+  echo "$s"
+}
+
+download_file() {
+  local url="$1"
+  local out="$2"
+
+  if [[ "$DOWNLOADER" == "curl" ]]; then
+    curl -fsSL "$url" -o "$out"
+  else
+    wget -q "$url" -O "$out"
+  fi
+}
+
+check_output() {
+  local file="$1"
+  local bad=0
+
+  local patterns=(
+    "%BIN%"
+    "%LISTS%"
+    "%GameFilterTCP%"
+    "%GameFilterUDP%"
+    "--wf-tcp"
+    "--wf-udp"
+    "winws.exe"
+    "start \""
+    "@echo"
+    "chcp"
+    "cd /d"
+  )
+
+  for p in "${patterns[@]}"; do
+    if grep -Fq -- "$p" "$file"; then
+      echo "WARNING: suspicious leftover in $file: $p" >&2
+      bad=1
+    fi
+  done
+
+  if grep -q '\^' "$file"; then
+    echo "WARNING: suspicious leftover in $file: ^" >&2
+    bad=1
+  fi
+
+  if grep -Eq -- '--[^=[:space:]]+="[^"]+"' "$file"; then
+    echo 'WARNING: suspicious quoted --key="value" in '"$file" >&2
+    bad=1
+  fi
+
+  if [[ "$bad" -eq 0 ]]; then
+    echo "    OK"
+  fi
+}
+
+# === Download and convert ===
+
+for file in "${FILES[@]}"; do
+  echo
+  echo "[*] Processing: $file"
+
+  encoded_file="$(urlencode_path_component "$file")"
+  url="$BASE_URL/$encoded_file"
+
+  local_bat="$OUT_DIR/$file"
+
+  base_name="${file%.bat}"
+  out_conf="$OUT_DIR/$base_name.nfqws2.conf"
+  report="$OUT_DIR/$base_name.report.md"
+
+  echo "    Download: $url"
+  download_file "$url" "$local_bat"
+
+  echo "    Convert: $out_conf"
+  "$PYTHON" "$CONVERTER" \
+    "$local_bat" \
+    --config-style \
+    --bin-dir "$BIN_DIR" \
+    --lists-dir "$LISTS_DIR" \
+    -o "$out_conf" \
+    --report "$report"
+
+  check_output "$out_conf"
+done
+
+# === Archive ===
+
+ZIP_PATH="./converted_alt.zip"
+
+rm -f "$ZIP_PATH"
+
+if command -v zip >/dev/null 2>&1; then
+  (
+    cd "$OUT_DIR"
+    zip -qr "../$(basename "$ZIP_PATH")" .
+  )
+
+  echo
+  echo "[+] Done"
+  echo "    Folder:  $OUT_DIR"
+  echo "    Archive: $ZIP_PATH"
+else
+  TAR_PATH="./converted_alt.tar.gz"
+  rm -f "$TAR_PATH"
+  tar -czf "$TAR_PATH" "$OUT_DIR"
+
+  echo
+  echo "[+] Done"
+  echo "    Folder:  $OUT_DIR"
+  echo "    Archive: $TAR_PATH"
+fi
